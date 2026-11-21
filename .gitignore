@@ -1,5 +1,6 @@
 # === Next.js / Node.js artifacts ===
 node_modules/
+package-lock.json
 .next/
 out/
 build/
@@ -61,3 +62,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.code-workspace
+
+# === Native (non-Docker) runtime state ===
+.run/

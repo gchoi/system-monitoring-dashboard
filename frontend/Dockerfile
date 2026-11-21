@@ -5,6 +5,11 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install
 
+ARG NEXT_PUBLIC_BACKEND_PORT
+ARG NEXT_PUBLIC_WS_URL
+ENV NEXT_PUBLIC_BACKEND_PORT=$NEXT_PUBLIC_BACKEND_PORT
+ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
+
 COPY . .
 
 # Ignore typescript / eslint errors during docker build to speed up and prevent failure

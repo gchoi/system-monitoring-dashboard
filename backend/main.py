@@ -1,10 +1,14 @@
 import asyncio
+import os
 import json
 import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from gpu_monitor import GPUMonitor
 from system_monitor import SystemMonitor
+
+from pydantic import BaseModel
+import psutil
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -21,21 +25,89 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Monitors
+# Initialize Monitors (real telemetry only; unavailable metrics are reported as null)
 gpu_monitor = GPUMonitor()
-system_monitor = SystemMonitor(mock_mode=gpu_monitor.mock_mode)
+system_monitor = SystemMonitor()
+
+
+class KillProcessRequest(BaseModel):
+    force: bool = False
 
 
 @app.get("/api/health")
 def health_check():
     return {
         "status": "healthy",
-        "mock_mode": gpu_monitor.mock_mode,
-        "driver_version": gpu_monitor.driver_version,
-        "cuda_version": gpu_monitor.cuda_version,
-        "platform": system_monitor.platform_name,
         "hostname": system_monitor.hostname,
+        "platform": system_monitor.platform["os"],
+        "platform_info": system_monitor.platform,
+        **gpu_monitor.info(),
     }
+
+
+@app.post("/api/processes/{pid}/kill")
+def kill_process(pid: int, req: KillProcessRequest = KillProcessRequest()):
+    from fastapi import HTTPException
+
+    if pid <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot terminate system init / root process (PID <= 1)."
+        )
+
+    if pid == os.getpid():
+        raise HTTPException(
+            status_code=400,
+            detail="Refusing to terminate the monitoring API server itself."
+        )
+
+    try:
+        proc = psutil.Process(pid)
+        proc_name = proc.name()
+    except psutil.NoSuchProcess:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Process with PID {pid} was not found or already terminated."
+        )
+    except psutil.AccessDenied:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Permission denied to access process with PID {pid}."
+        )
+
+    try:
+        if req.force:
+            proc.kill()
+            action_type = "SIGKILL"
+        else:
+            proc.terminate()
+            action_type = "SIGTERM"
+
+        logger.info(f"Sent {action_type} to process {proc_name} (PID: {pid})")
+        return {
+            "success": True,
+            "message": f"Successfully sent {action_type} to process '{proc_name}' (PID: {pid}).",
+            "pid": pid,
+            "name": proc_name,
+        }
+    except psutil.NoSuchProcess:
+        return {
+            "success": True,
+            "message": f"Process {pid} already terminated.",
+            "pid": pid,
+            "name": proc_name,
+        }
+    except psutil.AccessDenied:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Permission denied: insufficient privileges to terminate process '{proc_name}' (PID: {pid})."
+        )
+    except Exception as e:
+        logger.error(f"Error terminating process {pid}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to terminate process {pid}: {str(e)}"
+        )
 
 
 @app.websocket("/ws")
@@ -45,8 +117,9 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             # Gather GPU + System telemetry
-            gpu_data = gpu_monitor.get_gpu_data()
-            system_data = system_monitor.get_full_system_data()
+            # psutil / ioreg calls are blocking -> run off the event loop
+            gpu_data = await asyncio.to_thread(gpu_monitor.get_gpu_data)
+            system_data = await asyncio.to_thread(system_monitor.get_full_system_data)
 
             # Combine into a single payload
             payload = {
@@ -73,7 +146,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    import os
 
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

@@ -16,6 +16,7 @@ import styles from './RealtimeChart.module.css';
 interface RealtimeChartProps {
   history: HistoryItem[];
   gpuName: string;
+  memoryLabel?: string;
 }
 
 const CustomTooltip = ({ active, payload, label }: any) => {
@@ -35,7 +36,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   return null;
 };
 
-export default function RealtimeChart({ history, gpuName }: RealtimeChartProps) {
+export default function RealtimeChart({ history, gpuName, memoryLabel = 'VRAM' }: RealtimeChartProps) {
   const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
@@ -66,7 +67,7 @@ export default function RealtimeChart({ history, gpuName }: RealtimeChartProps) 
           </div>
           <div className={styles.legendItem}>
             <span className={`${styles.legendColor} ${styles.colorMem}`} />
-            <span>VRAM Util</span>
+            <span>{memoryLabel} Util</span>
           </div>
         </div>
       </div>
@@ -87,7 +88,7 @@ export default function RealtimeChart({ history, gpuName }: RealtimeChartProps) 
                 <stop offset="95%" stopColor="var(--accent-purple)" stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.03)" vertical={false} />
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" vertical={false} />
             <XAxis 
               dataKey="time" 
               stroke="var(--text-muted)" 
@@ -113,17 +114,17 @@ export default function RealtimeChart({ history, gpuName }: RealtimeChartProps) 
               strokeWidth={2}
               fillOpacity={1}
               fill="url(#gpuUtilGrad)"
-              activeDot={{ r: 4, stroke: '#07090e', strokeWidth: 2 }}
+              activeDot={{ r: 4, stroke: 'var(--bg-secondary)', strokeWidth: 2 }}
             />
             <Area
-              name="VRAM Util"
+              name={`${memoryLabel} Util`}
               type="monotone"
               dataKey="memUtil"
               stroke="var(--accent-purple)"
               strokeWidth={2}
               fillOpacity={1}
               fill="url(#memUtilGrad)"
-              activeDot={{ r: 4, stroke: '#07090e', strokeWidth: 2 }}
+              activeDot={{ r: 4, stroke: 'var(--bg-secondary)', strokeWidth: 2 }}
             />
           </AreaChart>
         </ResponsiveContainer>

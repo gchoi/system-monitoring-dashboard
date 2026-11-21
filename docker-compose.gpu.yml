@@ -1,0 +1,13 @@
+# NVIDIA GPU access for the backend container (Linux hosts with the
+# NVIDIA Container Toolkit). start.sh adds this file automatically when an
+# NVIDIA GPU is detected; manual use:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+services:
+  backend:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

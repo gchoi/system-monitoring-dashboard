@@ -33,20 +33,32 @@ export default function GpuCard({ gpu, isActive, onClick }: GpuCardProps) {
       </div>
       
       <div className={styles.metricsRow}>
-        <div className={styles.metric}>
-          <span className={styles.metricLabel}>UTIL</span>
-          <span className={styles.metricValue}>{gpu.gpu_util}%</span>
-        </div>
-        <div className={styles.metric}>
-          <span className={styles.metricLabel}>VRAM</span>
-          <span className={styles.metricValue}>{gpu.mem_util}%</span>
-        </div>
-        <div className={styles.metric}>
-          <span className={styles.metricLabel}>TEMP</span>
-          <span className={`${styles.metricValue} ${getTempClass(gpu.temperature)}`}>
-            {gpu.temperature}°C
-          </span>
-        </div>
+        {gpu.gpu_util != null && (
+          <div className={styles.metric}>
+            <span className={styles.metricLabel}>UTIL</span>
+            <span className={styles.metricValue}>{gpu.gpu_util}%</span>
+          </div>
+        )}
+        {gpu.mem_util != null && (
+          <div className={styles.metric}>
+            <span className={styles.metricLabel}>{gpu.memory_kind === 'unified' ? 'MEM' : 'VRAM'}</span>
+            <span className={styles.metricValue}>{gpu.mem_util}%</span>
+          </div>
+        )}
+        {gpu.temperature != null && (
+          <div className={styles.metric}>
+            <span className={styles.metricLabel}>TEMP</span>
+            <span className={`${styles.metricValue} ${getTempClass(gpu.temperature)}`}>
+              {gpu.temperature}°C
+            </span>
+          </div>
+        )}
+        {gpu.temperature == null && gpu.core_count != null && (
+          <div className={styles.metric}>
+            <span className={styles.metricLabel}>CORES</span>
+            <span className={styles.metricValue}>{gpu.core_count}</span>
+          </div>
+        )}
       </div>
     </div>
   );

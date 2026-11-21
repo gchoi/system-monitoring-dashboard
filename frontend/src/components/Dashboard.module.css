@@ -13,11 +13,12 @@
   justify-content: space-between;
   align-items: center;
   padding: 20px 24px;
-  background: var(--glass-bg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: var(--glass-sheen), var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(24px) saturate(165%);
+  -webkit-backdrop-filter: blur(24px) saturate(165%);
   border: 1px solid var(--glass-border);
-  border-radius: 16px;
+  border-radius: 24px;
 }
 
 .titleArea {
@@ -29,7 +30,7 @@
 .title {
   font-family: var(--font-display);
   font-size: 1.5rem;
-  font-weight: 800;
+  font-weight: 650;
   letter-spacing: -0.02em;
   color: var(--text-bright);
   white-space: nowrap;
@@ -42,7 +43,7 @@
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface-hover);
   padding: 6px 12px;
   border-radius: 20px;
   border: 1px solid var(--glass-border);
@@ -85,9 +86,9 @@
 
 .badge {
   background: linear-gradient(135deg, var(--accent-orange), var(--accent-red));
-  color: #07090e;
+  color: var(--button-ink);
   font-size: 0.65rem;
-  font-weight: 800;
+  font-weight: 650;
   padding: 2px 6px;
   border-radius: 4px;
   margin-left: 8px;
@@ -97,7 +98,7 @@
 
 .grid {
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: 300px minmax(0, 1fr);
   gap: 24px;
 }
 
@@ -116,7 +117,7 @@
 .sectionTitle {
   font-family: var(--font-display);
   font-size: 0.875rem;
-  font-weight: 800;
+  font-weight: 650;
   color: var(--text-muted);
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -134,6 +135,7 @@
 }
 
 .mainContent {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -152,10 +154,12 @@
   justify-content: center;
   padding: 80px 40px;
   text-align: center;
-  background: var(--glass-bg);
-  backdrop-filter: blur(16px);
+  background: var(--glass-sheen), var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(24px) saturate(165%);
+  backdrop-filter: blur(24px) saturate(165%);
   border: 1px solid var(--glass-border);
-  border-radius: 16px;
+  border-radius: 24px;
 }
 
 .errorTitle {
@@ -178,9 +182,9 @@
   margin-top: 24px;
   background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
   border: none;
-  color: #07090e;
+  color: var(--button-ink);
   font-family: var(--font-display);
-  font-weight: 800;
+  font-weight: 650;
   padding: 10px 24px;
   border-radius: 8px;
   cursor: pointer;
@@ -192,9 +196,29 @@
 .retryBtn:hover {
   opacity: 0.95;
   transform: translateY(-1px);
-  box-shadow: 0 4px 15px rgba(0, 242, 254, 0.3);
+  box-shadow: var(--control-shadow);
 }
 
 .retryBtn:active {
   transform: translateY(0);
 }
+
+.header { flex-wrap: wrap; gap: 20px; padding: 22px 26px; }
+.title { font-size: 1.45rem; font-weight: 650; letter-spacing: -.055em; }
+.titleArea { gap: 12px; }
+.headerControls { display: flex; flex: 1; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 14px; min-width: 0; }
+.systemInfo { flex-basis: 100%; order: 3; justify-content: flex-end; flex-wrap: wrap; gap: 12px 24px; padding-top: 14px; border-top: 1px solid var(--glass-border); }
+.infoValueMono { color: var(--text-secondary); font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; }
+.infoLabel { text-transform: none; font-weight: 500; letter-spacing: 0; }
+.connectionStatus { text-transform: capitalize; letter-spacing: 0; padding: 10px 14px; }
+.sectionTitle { text-transform: none; font-size: .95rem; letter-spacing: -.015em; font-weight: 600; margin-bottom: 14px; color: var(--text-secondary); }
+.retryBtn { border-radius: 999px; text-transform: none; letter-spacing: 0; }
+@media (max-width: 700px) {
+  .container { padding: 14px; gap: 20px; }
+  .header { padding: 18px; gap: 18px; }
+  .headerControls { flex-basis: 100%; justify-content: space-between; gap: 12px; }
+  .systemInfo { justify-content: flex-start; }
+  .infoItem { align-items: flex-start; max-width: 100%; }
+  .errorPanel { padding: 48px 20px; }
+}
+@media (max-width: 390px) { .headerControls { justify-content: flex-start; } }

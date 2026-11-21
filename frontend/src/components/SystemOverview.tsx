@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { Cpu, MemoryStick, HardDrive, Wifi, Thermometer, ArrowUp, ArrowDown } from 'lucide-react';
 import { SystemData } from '../types/gpu';
 import styles from './SystemOverview.module.css';
@@ -33,7 +33,10 @@ function formatMB(mb: number): string {
 
 export default function SystemOverview({ system }: SystemOverviewProps) {
   const { cpu, memory, disk, network, uptime, hostname, platform } = system;
-  const mainDisk = disk.partitions[0];
+  const [selectedDisk, setSelectedDisk] = useState<string | null>(null);
+  // Falls back to the primary volume when the chosen drive disappears (e.g. USB unplugged).
+  const mainDisk = disk.partitions.find((p) => p.mountpoint === selectedDisk) ?? disk.partitions[0];
+  const driveLabel = (mountpoint: string) => mountpoint.replace(/(.)\\$/, '$1'); // "C:\" -> "C:"
 
   const getPercentColor = (pct: number): string => {
     if (pct >= 90) return 'var(--accent-red)';
@@ -68,7 +71,7 @@ export default function SystemOverview({ system }: SystemOverviewProps) {
         </div>
         <div className={styles.cardMeta}>
           <span>{cpu.count_logical} threads</span>
-          <span>{cpu.frequency_current} MHz</span>
+          {cpu.frequency_current != null && <span>{cpu.frequency_current} MHz</span>}
         </div>
       </div>
 
@@ -104,8 +107,22 @@ export default function SystemOverview({ system }: SystemOverviewProps) {
         <div className={styles.cardHeader}>
           <div className={styles.cardTitle}>
             <HardDrive size={16} style={{ color: 'var(--accent-green)' }} />
-            <span>Disk{mainDisk ? ` — ${mainDisk.mountpoint}` : ''}</span>
+            <span>Disk</span>
           </div>
+          {disk.partitions.length > 1 ? (
+            <select
+              className={styles.driveSelect}
+              aria-label="Select drive"
+              value={mainDisk.mountpoint}
+              onChange={(e) => setSelectedDisk(e.target.value)}
+            >
+              {disk.partitions.map((p) => (
+                <option key={p.mountpoint} value={p.mountpoint}>{driveLabel(p.mountpoint)}</option>
+              ))}
+            </select>
+          ) : mainDisk && (
+            <span className={styles.driveSelect}>{driveLabel(mainDisk.mountpoint)}</span>
+          )}
         </div>
         {mainDisk ? (
           <>

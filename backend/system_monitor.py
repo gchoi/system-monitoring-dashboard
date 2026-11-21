@@ -1,39 +1,64 @@
 import time
 import os
+import re
 import platform
-import random
-import math
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SystemMonitor")
 
-try:
-    import psutil
-    HAS_PSUTIL = True
-except ImportError:
-    HAS_PSUTIL = False
-    logger.warning("psutil package not found. System monitoring disabled.")
+import psutil
+
+from platform_info import detect_platform
+
+# Host's /etc/hostname, bind-mounted read-only by docker-compose.yml. Inside a
+# container platform.node() returns the container ID, not the machine name.
+HOST_HOSTNAME_FILE = "/host/etc/hostname"
+
+
+def get_host_hostname():
+    try:
+        with open(HOST_HOSTNAME_FILE, "r") as f:
+            name = f.read().strip()
+            if name:
+                return name
+    except OSError:
+        pass
+    return platform.node()
+
+
+def parse_block_mounts(lines):
+    """(device, mountpoint, fstype) for /proc/*/mounts lines backed by a real block device, one per device."""
+    seen, out = set(), []
+    for line in lines:
+        dev, mp, fstype = line.split()[:3]
+        # shortcut: only /dev block devices (drops snap loops, tmpfs, overlay, NFS, ZFS datasets); widen if those matter
+        if not dev.startswith("/dev/") or dev.startswith("/dev/loop") or dev in seen:
+            continue
+        seen.add(dev)  # first mount wins: "/" before its bind mounts / btrfs subvolumes
+        out.append((dev, re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), mp), fstype))
+    return out
+
+
+assert parse_block_mounts([
+    "overlay / overlay rw 0 0",
+    "/dev/sda2 / ext4 rw 0 0",
+    "/dev/sda2 /etc/hosts ext4 rw 0 0",
+    "/dev/loop3 /snap/core/1 squashfs ro 0 0",
+    "tmpfs /run tmpfs rw 0 0",
+    "/dev/sdb1 /media/me/MY\\040USB vfat rw 0 0",
+]) == [("/dev/sda2", "/", "ext4"), ("/dev/sdb1", "/media/me/MY USB", "vfat")]
 
 
 class SystemMonitor:
-    def __init__(self, mock_mode=False):
-        self.mock_mode = mock_mode or not HAS_PSUTIL
-        self.mock_start_time = time.time()
-        self.hostname = platform.node()
-        self.platform_name = platform.system()
-        self.platform_release = platform.release()
-        self.platform_version = platform.version()
-
-        if self.mock_mode:
-            logger.info("SystemMonitor running in Mock Mode.")
+    def __init__(self):
+        self.hostname = get_host_hostname()
+        self.platform = detect_platform()
+        self.is_linux = self.platform["os"] == "Linux"
 
     # ── CPU ────────────────────────────────────────────────────────
 
     def get_cpu_data(self):
-        if self.mock_mode:
-            return self._mock_cpu_data()
-
         try:
             # Call cpu_percent once with a short interval to prime the counter,
             # then read the real value.
@@ -41,7 +66,11 @@ class SystemMonitor:
             time.sleep(0.1)
             percent = psutil.cpu_percent(interval=0)
             per_core = psutil.cpu_percent(interval=0, percpu=True)
-            freq = psutil.cpu_freq()
+            freq = None
+            try:
+                freq = psutil.cpu_freq()
+            except Exception:
+                pass  # not exposed on some platforms (e.g. certain Apple Silicon builds)
 
             load_avg = [0.0, 0.0, 0.0]
             try:
@@ -70,8 +99,8 @@ class SystemMonitor:
                 "per_core": [round(c, 1) for c in per_core],
                 "count_logical": psutil.cpu_count(logical=True) or 0,
                 "count_physical": psutil.cpu_count(logical=False) or 0,
-                "frequency_current": round(freq.current, 0) if freq else 0,
-                "frequency_max": round(freq.max, 0) if freq and freq.max else 0,
+                "frequency_current": round(freq.current, 0) if freq and freq.current else None,
+                "frequency_max": round(freq.max, 0) if freq and freq.max else None,
                 "temperature": round(temperature, 1) if temperature is not None else None,
                 "load_avg": [round(l, 2) for l in load_avg],
             }
@@ -82,8 +111,8 @@ class SystemMonitor:
                 "per_core": [],
                 "count_logical": 0,
                 "count_physical": 0,
-                "frequency_current": 0,
-                "frequency_max": 0,
+                "frequency_current": None,
+                "frequency_max": None,
                 "temperature": None,
                 "load_avg": [0.0, 0.0, 0.0],
             }
@@ -91,9 +120,6 @@ class SystemMonitor:
     # ── Memory ─────────────────────────────────────────────────────
 
     def get_memory_data(self):
-        if self.mock_mode:
-            return self._mock_memory_data()
-
         try:
             mem = psutil.virtual_memory()
             swap = psutil.swap_memory()
@@ -115,28 +141,56 @@ class SystemMonitor:
 
     # ── Disk ───────────────────────────────────────────────────────
 
-    def get_disk_data(self):
-        if self.mock_mode:
-            return self._mock_disk_data()
+    def _list_partitions(self):
+        """(device, mountpoint, fstype, path to stat) for each user-facing volume."""
+        os_name = self.platform["os"]
+        if os_name == "Linux":
+            # docker-compose runs us with pid: host, so /proc/1 is the host's init:
+            # read the host mount table and stat through its root to see host disks/USB.
+            root = ""
+            if self.platform["in_container"]:
+                try:
+                    os.listdir("/proc/1/root")
+                    root = "/proc/1/root"
+                except OSError:
+                    pass
+            with open("/proc/1/mounts" if root else "/proc/self/mounts") as f:
+                return [(dev, mp, fs, root + mp) for dev, mp, fs in parse_block_mounts(f)]
 
+        parts = psutil.disk_partitions(all=False)
+        if os_name == "macOS":
+            # APFS system volumes (sealed /, Preboot, VM...) share the Data volume's space;
+            # external and USB disks mount under /Volumes.
+            parts = [p for p in parts
+                     if p.mountpoint == "/System/Volumes/Data" or p.mountpoint.startswith("/Volumes/")]
+        return [(p.device, p.mountpoint, p.fstype, p.mountpoint) for p in parts]
+
+    def get_disk_data(self):
         disks = []
         try:
-            for part in psutil.disk_partitions(all=False):
+            for device, mountpoint, fstype, path in self._list_partitions():
                 try:
-                    usage = psutil.disk_usage(part.mountpoint)
+                    usage = psutil.disk_usage(path)
                     disks.append({
-                        "device": part.device,
-                        "mountpoint": part.mountpoint,
-                        "fstype": part.fstype,
+                        "device": device,
+                        "mountpoint": mountpoint,
+                        "fstype": fstype,
                         "total": round(usage.total / (1024 * 1024)),
                         "used": round(usage.used / (1024 * 1024)),
                         "free": round(usage.free / (1024 * 1024)),
                         "percent": round(usage.percent, 1),
                     })
-                except PermissionError:
+                except OSError:  # access denied, or removable drive with no media
                     continue
         except Exception as e:
             logger.error(f"Failed to get disk data: {e}")
+
+        # Put the volume that actually holds user data first (used by the overview card).
+        os_name = self.platform["os"]
+        primary = {"macOS": "/System/Volumes/Data", "Linux": "/"}.get(os_name)
+        if os_name == "Windows":
+            primary = (os.environ.get("SystemDrive", "C:") + "\\").upper()
+        disks.sort(key=lambda d: 0 if d["mountpoint"].upper() == (primary or "").upper() else 1)
 
         io_data = {}
         try:
@@ -156,9 +210,6 @@ class SystemMonitor:
     # ── Network ────────────────────────────────────────────────────
 
     def get_network_data(self):
-        if self.mock_mode:
-            return self._mock_network_data()
-
         try:
             net = psutil.net_io_counters()
             return {
@@ -180,6 +231,77 @@ class SystemMonitor:
         except Exception:
             return 0
 
+    # ── Processes ──────────────────────────────────────────────────
+
+    _PROC_ATTRS = [
+        'pid', 'ppid', 'name', 'username', 'cpu_percent', 'memory_info',
+        'memory_percent', 'status', 'cmdline', 'terminal',
+    ]
+    _SCRIPT_HOSTS = ("python", "node", "bash", "sh", "zsh", "perl", "ruby", "java", "deno", "bun")
+
+    def get_processes_data(self):
+        """All processes visible to this user, including background ones.
+
+        ``background`` is True when a process has no controlling terminal
+        (daemons, launchd/systemd services, nohup'd or detached jobs).
+        """
+        processes = []
+        try:
+            for p in psutil.process_iter(self._PROC_ATTRS):
+                try:
+                    info = p.info
+                    pid = info['pid']
+                    ppid = info.get('ppid') or 0
+                    cmdline = info.get('cmdline') or []
+                    name = info.get('name') or "Unknown"
+
+                    # Skip Linux kernel threads (children of kthreadd, no cmdline).
+                    if self.is_linux and (pid <= 2 or ppid == 2):
+                        continue
+                    if pid == 0:
+                        continue
+
+                    user = info.get('username') or "unknown"
+                    if user.isdigit():
+                        try:
+                            import pwd
+                            user = pwd.getpwuid(int(user)).pw_name
+                        except Exception:
+                            pass
+
+                    if cmdline:
+                        full_cmd = " ".join(cmdline)
+                        display_cmd = full_cmd if len(full_cmd) <= 160 else full_cmd[:157] + "..."
+                    else:
+                        display_cmd = name
+
+                    display_name = name
+                    if name.startswith(self._SCRIPT_HOSTS) and len(cmdline) > 1:
+                        args = [a for a in cmdline[1:] if not a.startswith("-")]
+                        if args:
+                            display_name = f"{name} {os.path.basename(args[0])}"
+
+                    mem_info = info.get('memory_info')
+                    processes.append({
+                        "pid": pid,
+                        "name": display_name,
+                        "command": display_cmd,
+                        "user": user,
+                        "cpu_percent": round(info.get('cpu_percent') or 0.0, 1),
+                        "memory_mb": round(mem_info.rss / (1024 * 1024), 1) if mem_info else 0.0,
+                        "memory_percent": round(info.get('memory_percent') or 0.0, 1),
+                        "status": info.get('status') or "unknown",
+                        "background": info.get('terminal') is None,
+                    })
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+
+            processes.sort(key=lambda x: (x["cpu_percent"], x["memory_mb"]), reverse=True)
+            return processes
+        except Exception as e:
+            logger.error(f"Failed to get system processes: {e}")
+            return []
+
     # ── Combined ───────────────────────────────────────────────────
 
     def get_full_system_data(self):
@@ -188,101 +310,9 @@ class SystemMonitor:
             "memory": self.get_memory_data(),
             "disk": self.get_disk_data(),
             "network": self.get_network_data(),
+            "processes": self.get_processes_data(),
             "uptime": self.get_uptime(),
-            "platform": self.platform_name,
-            "platform_release": self.platform_release,
             "hostname": self.hostname,
-        }
-
-    # ═══════════════════════════════════════════════════════════════
-    #  Mock data generators
-    # ═══════════════════════════════════════════════════════════════
-
-    def _mock_cpu_data(self):
-        t = time.time() - self.mock_start_time
-        base_load = 35 + math.sin(t * 0.1) * 20
-        percent = max(0.0, min(100.0, base_load + random.uniform(-5, 5)))
-        per_core = [
-            max(0.0, min(100.0, base_load + random.uniform(-15, 15)))
-            for _ in range(8)
-        ]
-        temp = 45.0 + (percent / 100.0) * 30.0 + random.uniform(-2, 2)
-
-        return {
-            "percent": round(percent, 1),
-            "per_core": [round(c, 1) for c in per_core],
-            "count_logical": 8,
-            "count_physical": 4,
-            "frequency_current": 3200 + int((percent / 100.0) * 1300),
-            "frequency_max": 4500,
-            "temperature": round(temp, 1),
-            "load_avg": [
-                round(base_load / 25 + random.uniform(-0.3, 0.3), 2),
-                round(base_load / 30 + random.uniform(-0.2, 0.2), 2),
-                round(base_load / 35 + random.uniform(-0.1, 0.1), 2),
-            ],
-        }
-
-    def _mock_memory_data(self):
-        t = time.time() - self.mock_start_time
-        total = 32768  # 32 GB in MB
-        percent = 55.0 + math.sin(t * 0.015) * 15 + random.uniform(-2, 2)
-        percent = max(20.0, min(85.0, percent))
-        used = int((percent / 100.0) * total)
-        swap_total = 8192
-        swap_percent = 10.0 + math.sin(t * 0.01) * 8
-        swap_used = int((swap_percent / 100.0) * swap_total)
-
-        return {
-            "total": total,
-            "used": used,
-            "available": total - used,
-            "percent": round(percent, 1),
-            "swap_total": swap_total,
-            "swap_used": swap_used,
-            "swap_percent": round(swap_percent, 1),
-        }
-
-    def _mock_disk_data(self):
-        t = time.time() - self.mock_start_time
-        total = 1024000  # ~1 TB in MB
-        base_used = 480000 + t * 0.5
-        used = min(int(base_used), total - 100000)
-
-        return {
-            "partitions": [
-                {
-                    "device": "/dev/nvme0n1p2",
-                    "mountpoint": "/",
-                    "fstype": "ext4",
-                    "total": total,
-                    "used": used,
-                    "free": total - used,
-                    "percent": round((used / total) * 100, 1),
-                },
-                {
-                    "device": "/dev/nvme0n1p1",
-                    "mountpoint": "/boot/efi",
-                    "fstype": "vfat",
-                    "total": 512,
-                    "used": 128,
-                    "free": 384,
-                    "percent": 25.0,
-                },
-            ],
-            "io": {
-                "read_bytes": int(1234567890 + t * 50000),
-                "write_bytes": int(987654321 + t * 30000),
-                "read_count": int(1234567 + t * 10),
-                "write_count": int(987654 + t * 8),
-            },
-        }
-
-    def _mock_network_data(self):
-        t = time.time() - self.mock_start_time
-        return {
-            "bytes_sent": int(12345678 + t * 15000),
-            "bytes_recv": int(98765432 + t * 45000),
-            "packets_sent": int(123456 + t * 20),
-            "packets_recv": int(98765 + t * 30),
+            "platform": self.platform["os"],
+            "platform_info": self.platform,
         }

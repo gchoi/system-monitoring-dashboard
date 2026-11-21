@@ -92,7 +92,7 @@ export default function SystemCharts({ cpuHistory, memoryHistory }: SystemCharts
                   <stop offset="95%" stopColor="var(--accent-cyan)" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" vertical={false} />
               <XAxis dataKey="time" stroke="var(--text-muted)" fontSize={10} tickLine={false} axisLine={false} dy={10} />
               <YAxis domain={[0, 100]} stroke="var(--text-muted)" fontSize={10} tickLine={false} axisLine={false} dx={-5} />
               <Tooltip content={<CustomTooltip />} />
@@ -104,7 +104,7 @@ export default function SystemCharts({ cpuHistory, memoryHistory }: SystemCharts
                 strokeWidth={2}
                 fillOpacity={1}
                 fill="url(#cpuHistGrad)"
-                activeDot={{ r: 4, stroke: '#07090e', strokeWidth: 2 }}
+                activeDot={{ r: 4, stroke: 'var(--bg-secondary)', strokeWidth: 2 }}
               />
             </AreaChart>
           </ResponsiveContainer>
@@ -131,7 +131,7 @@ export default function SystemCharts({ cpuHistory, memoryHistory }: SystemCharts
                   <stop offset="95%" stopColor="var(--accent-purple)" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" vertical={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" vertical={false} />
               <XAxis dataKey="time" stroke="var(--text-muted)" fontSize={10} tickLine={false} axisLine={false} dy={10} />
               <YAxis domain={[0, 100]} stroke="var(--text-muted)" fontSize={10} tickLine={false} axisLine={false} dx={-5} />
               <Tooltip content={<CustomTooltip />} />
@@ -143,7 +143,7 @@ export default function SystemCharts({ cpuHistory, memoryHistory }: SystemCharts
                 strokeWidth={2}
                 fillOpacity={1}
                 fill="url(#memHistGrad)"
-                activeDot={{ r: 4, stroke: '#07090e', strokeWidth: 2 }}
+                activeDot={{ r: 4, stroke: 'var(--bg-secondary)', strokeWidth: 2 }}
               />
             </AreaChart>
           </ResponsiveContainer>

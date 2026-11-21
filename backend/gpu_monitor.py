@@ -1,329 +1,414 @@
-import time
-import os
-import math
-import random
+"""GPU telemetry.
+
+Supported backends:
+  * NVIDIA via NVML (Linux / Windows)          -> backend "nvml"
+  * Apple GPU via IOKit registry (macOS)       -> backend "metal"
+    Metal / Metal Performance Shaders (MPS) workloads run on the Apple GPU;
+    utilization, GPU memory and per-process GPU time are read from the
+    IOAccelerator registry entries (no root privileges required).
+
+No simulated data is ever produced. A metric that the platform does not
+expose is reported as ``None`` and a GPU that cannot be detected is simply
+not listed.
+"""
+
 import logging
+import os
+import platform
+import plistlib
+import re
+import subprocess
+import time
 
-# Configure logger
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("GPUMonitor")
-
-# Try to import pynvml and psutil
-try:
-    import pynvml
-    HAS_PYNVML = True
-except ImportError:
-    HAS_PYNVML = False
-    logger.warning("pynvml package not found. Running in Mock Mode.")
 
 try:
     import psutil
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
-    logger.warning("psutil package not found. Process names may not be fully resolved.")
 
-class GPUMonitor:
-    def __init__(self):
-        self.mock_mode = not HAS_PYNVML
-        self.device_handles = []
-        self.driver_version = "N/A"
-        self.cuda_version = "N/A"
-        self.mock_start_time = time.time()
-        
-        # Check environment override
-        if os.environ.get("MOCK_GPU", "false").lower() == "true":
-            self.mock_mode = True
-            logger.info("MOCK_GPU environment variable is set to true. Force starting in Mock Mode.")
+MB = 1024 * 1024
 
-        if not self.mock_mode:
-            try:
-                pynvml.nvmlInit()
-                device_count = pynvml.nvmlDeviceGetCount()
-                logger.info(f"Successfully initialized NVML. Found {device_count} GPU(s).")
-                for i in range(device_count):
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                    self.device_handles.append(handle)
-                
-                try:
-                    self.driver_version = pynvml.nvmlSystemGetDriverVersion().decode('utf-8')
-                except Exception:
-                    self.driver_version = pynvml.nvmlSystemGetDriverVersion()
-                
-                try:
-                    cuda_v = pynvml.nvmlSystemGetCudaDriverVersion()
-                    self.cuda_version = f"{(cuda_v // 1000)}.{((cuda_v % 1000) // 10)}"
-                except Exception:
-                    self.cuda_version = "Unknown"
-            except Exception as e:
-                logger.warning(f"Failed to initialize NVML: {e}. Falling back to Mock Mode.")
-                self.mock_mode = True
-                self._setup_mock_data()
-        else:
-            self._setup_mock_data()
 
-    def _setup_mock_data(self):
-        self.driver_version = "555.42.02"
-        self.cuda_version = "12.5"
-        # Setup static properties of mock devices
-        self.mock_devices = [
-            {
-                "index": 0,
-                "name": "NVIDIA GeForce RTX 4090",
-                "memory_total": 24576,  # MB
-                "power_limit": 450.0,   # W
-                "uuid": "GPU-8c385b29-e85d-85fa-71f0-4fa815f949c8",
-                "base_temp": 40.0,
-                "base_fan": 30.0,
-                "processes": [
-                    {"pid": 12844, "name": "python train.py", "type": "Compute"},
-                    {"pid": 9482, "name": "ollama run llama3", "type": "Compute"},
-                    {"pid": 1102, "name": "xorg", "type": "Graphics"}
-                ]
-            },
-            {
-                "index": 1,
-                "name": "NVIDIA H100 Tensor Core PCIe",
-                "memory_total": 81920,  # MB
-                "power_limit": 350.0,   # W
-                "uuid": "GPU-ef3f37ab-7132-4d2c-8438-e69c47012984",
-                "base_temp": 35.0,
-                "base_fan": 45.0,
-                "processes": [
-                    {"pid": 20491, "name": "vllm-openai-server", "type": "Compute"},
-                    {"pid": 20554, "name": "python evaluate.py", "type": "Compute"}
-                ]
-            }
-        ]
-
-    def _get_process_name(self, pid):
-        if not HAS_PSUTIL:
-            return "Unknown"
+def _process_display_name(pid, fallback=None):
+    if not HAS_PSUTIL:
+        return fallback or "Unknown"
+    try:
+        p = psutil.Process(pid)
+        name = p.name()
         try:
-            return psutil.Process(pid).name()
+            cmdline = p.cmdline()
+            if name.startswith("python") and len(cmdline) > 1:
+                script = os.path.basename(cmdline[1])
+                if not script.startswith("-"):
+                    return f"{name} {script}"
+        except (psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+        return name or fallback or "Unknown"
+    except Exception:
+        return fallback or "Unknown"
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  NVIDIA (NVML)
+# ═══════════════════════════════════════════════════════════════════
+
+class NvidiaBackend:
+    name = "nvml"
+
+    def __init__(self):
+        import pynvml  # raises ImportError if unavailable
+        self.nvml = pynvml
+        pynvml.nvmlInit()
+        count = pynvml.nvmlDeviceGetCount()
+        if count == 0:
+            raise RuntimeError("NVML initialized but no NVIDIA GPU found")
+        self.handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(count)]
+
+        drv = pynvml.nvmlSystemGetDriverVersion()
+        self.driver_version = drv.decode() if isinstance(drv, bytes) else drv
+        try:
+            cv = pynvml.nvmlSystemGetCudaDriverVersion()
+            self.cuda_version = f"{cv // 1000}.{(cv % 1000) // 10}"
         except Exception:
-            return "Unknown"
+            self.cuda_version = None
+        logger.info("NVML initialized: %d GPU(s), driver %s", count, self.driver_version)
 
-    def get_gpu_data(self):
-        if self.mock_mode:
-            return self._get_mock_gpu_data()
-        
+    def info(self):
+        return {
+            "driver_version": self.driver_version,
+            "cuda_version": self.cuda_version,
+        }
+
+    @staticmethod
+    def _try(fn, default=None):
+        try:
+            return fn()
+        except Exception:
+            return default
+
+    def get_gpus(self):
+        nv = self.nvml
         gpus = []
-        for i, handle in enumerate(self.device_handles):
-            try:
-                name = pynvml.nvmlDeviceGetName(handle)
-                if isinstance(name, bytes):
-                    name = name.decode('utf-8')
-            except Exception:
-                name = f"NVIDIA GPU {i}"
+        for i, h in enumerate(self.handles):
+            name = self._try(lambda: nv.nvmlDeviceGetName(h), f"NVIDIA GPU {i}")
+            if isinstance(name, bytes):
+                name = name.decode()
+            uuid = self._try(lambda: nv.nvmlDeviceGetUUID(h), f"nvidia-{i}")
+            if isinstance(uuid, bytes):
+                uuid = uuid.decode()
 
-            try:
-                uuid = pynvml.nvmlDeviceGetUUID(handle)
-                if isinstance(uuid, bytes):
-                    uuid = uuid.decode('utf-8')
-            except Exception:
-                uuid = f"GPU-MOCK-{i}"
+            util = self._try(lambda: nv.nvmlDeviceGetUtilizationRates(h))
+            mem = self._try(lambda: nv.nvmlDeviceGetMemoryInfo(h))
+            mem_total = int(mem.total / MB) if mem else None
+            mem_used = int(mem.used / MB) if mem else None
+            mem_free = int(mem.free / MB) if mem else None
+            mem_util = int(mem_used / mem_total * 100) if mem and mem_total else None
 
-            # Utilization
-            try:
-                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                gpu_util = util.gpu
-                mem_util_pct = util.memory
-            except Exception:
-                gpu_util = 0
-                mem_util_pct = 0
+            temp = self._try(lambda: nv.nvmlDeviceGetTemperature(h, nv.NVML_TEMPERATURE_GPU))
+            fan = self._try(lambda: nv.nvmlDeviceGetFanSpeed(h))
+            power = self._try(lambda: nv.nvmlDeviceGetPowerUsage(h) / 1000.0)
+            power_limit = self._try(lambda: nv.nvmlDeviceGetPowerManagementLimit(h) / 1000.0)
 
-            # Memory Info
-            try:
-                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                mem_total = mem.total / (1024 * 1024)  # to MB
-                mem_used = mem.used / (1024 * 1024)    # to MB
-                mem_free = mem.free / (1024 * 1024)    # to MB
-                # Use nvml memory util if utilization rate fails, or recalculate
-                if mem_util_pct == 0 and mem_total > 0:
-                    mem_util_pct = int((mem_used / mem_total) * 100)
-            except Exception:
-                mem_total = 0
-                mem_used = 0
-                mem_free = 0
-                mem_util_pct = 0
+            proc_map = {}
+            for kind, fn in (("Graphics", nv.nvmlDeviceGetGraphicsRunningProcesses),
+                             ("Compute", nv.nvmlDeviceGetComputeRunningProcesses)):
+                for p in self._try(lambda: fn(h), []) or []:
+                    used = int(p.usedGpuMemory / MB) if p.usedGpuMemory else None
+                    if p.pid in proc_map:
+                        entry = proc_map[p.pid]
+                        entry["type"] = "C+G"
+                        if used is not None and (entry["used_memory"] or 0) < used:
+                            entry["used_memory"] = used
+                    else:
+                        proc_map[p.pid] = {"type": kind, "used_memory": used}
 
-            # Temperature
-            try:
-                temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-            except Exception:
-                temp = 0
-
-            # Fan Speed
-            try:
-                fan_speed = pynvml.nvmlDeviceGetFanSpeed(handle)
-            except Exception:
-                fan_speed = 0  # 0 indicates fan-less or failed read
-
-            # Power usage
-            try:
-                power_draw = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # W
-            except Exception:
-                power_draw = 0.0
-
-            try:
-                power_limit = pynvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000.0  # W
-            except Exception:
-                power_limit = 0.0
-
-            # Processes
-            processes = []
-            try:
-                # NVML separates graphics and compute processes
-                procs = []
-                try:
-                    procs.extend([(p, "Graphics") for p in pynvml.nvmlDeviceGetGraphicsRunningProcesses(handle)])
-                except Exception:
-                    pass
-                
-                try:
-                    procs.extend([(p, "Compute") for p in pynvml.nvmlDeviceGetComputeRunningProcesses(handle)])
-                except Exception:
-                    pass
-
-                for p, proc_type in procs:
-                    proc_name = self._get_process_name(p.pid)
-                    # If proc_name is unknown, nvml sometimes provides a name
-                    if proc_name == "Unknown" and hasattr(p, 'usedGpuMemory'):
-                        # nvml doesn't directly store name in the process struct unless we query it,
-                        # but some bindings might. Let's stick with psutil or basic.
-                        pass
-                    
-                    processes.append({
-                        "pid": p.pid,
-                        "name": proc_name,
-                        "type": proc_type,
-                        "used_memory": int(p.usedGpuMemory / (1024 * 1024)) if p.usedGpuMemory else 0  # MB
-                    })
-            except Exception as e:
-                logger.debug(f"Failed to fetch processes for GPU {i}: {e}")
+            processes = [
+                {
+                    "pid": pid,
+                    "name": _process_display_name(pid),
+                    "type": info["type"],
+                    "used_memory": info["used_memory"],
+                    "gpu_percent": None,
+                }
+                for pid, info in proc_map.items()
+            ]
 
             gpus.append({
                 "index": i,
                 "name": name,
                 "uuid": uuid,
-                "gpu_util": gpu_util,
-                "mem_util": mem_util_pct,
-                "mem_total": int(mem_total),
-                "mem_used": int(mem_used),
-                "mem_free": int(mem_free),
-                "temperature": temp,
-                "fan_speed": fan_speed,
-                "power_draw": round(power_draw, 1),
-                "power_limit": round(power_limit, 1),
-                "processes": processes
-            })
-
-        return {
-            "driver_version": self.driver_version,
-            "cuda_version": self.cuda_version,
-            "gpus": gpus,
-            "timestamp": time.time(),
-            "is_mock": False
-        }
-
-    def _get_mock_gpu_data(self):
-        t = time.time() - self.mock_start_time
-        gpus = []
-
-        for mock in self.mock_devices:
-            idx = mock["index"]
-            # Generate fluctuating metrics using sine waves and noise
-            if idx == 0:
-                # RTX 4090: High volatility (gaming/training simulation)
-                gpu_util = int(abs(math.sin(t * 0.1) * 60) + abs(math.cos(t * 0.05) * 30) + random.randint(-5, 5))
-                gpu_util = max(0, min(100, gpu_util))
-                
-                mem_util = int(50 + math.sin(t * 0.02) * 20 + random.randint(-2, 2))
-                mem_util = max(0, min(100, mem_util))
-                
-                power_draw = 150.0 + (gpu_util / 100.0) * 250.0 + random.uniform(-10.0, 10.0)
-                power_draw = max(50.0, min(mock["power_limit"], power_draw))
-                
-                temp = mock["base_temp"] + (gpu_util / 100.0) * 35.0 + random.uniform(-1, 1)
-                fan_speed = mock["base_fan"] + (temp - mock["base_temp"]) * 1.5
-                fan_speed = max(0, min(100, int(fan_speed)))
-            else:
-                # H100: Heavy load simulation (LLM inference)
-                # Stays highly active for 40 seconds, then drops, then rises
-                cycle = int(t) % 120
-                if cycle < 80:
-                    target_util = 85.0
-                    target_mem = 82.0
-                else:
-                    target_util = 15.0
-                    target_mem = 40.0
-                
-                gpu_util = int(target_util + random.randint(-5, 5))
-                gpu_util = max(0, min(100, gpu_util))
-                
-                mem_util = int(target_mem + random.randint(-1, 1))
-                mem_util = max(0, min(100, mem_util))
-                
-                power_draw = 80.0 + (gpu_util / 100.0) * 250.0 + random.uniform(-5.0, 5.0)
-                power_draw = max(40.0, min(mock["power_limit"], power_draw))
-                
-                temp = mock["base_temp"] + (gpu_util / 100.0) * 40.0 + random.uniform(-1, 1)
-                fan_speed = mock["base_fan"] + (temp - mock["base_temp"]) * 1.2
-                fan_speed = max(0, min(100, int(fan_speed)))
-
-            mem_used = int((mem_util / 100.0) * mock["memory_total"])
-            mem_free = mock["memory_total"] - mem_used
-
-            # Update mock processes memory based on global usage
-            processes = []
-            remaining_mem = mem_used
-            num_procs = len(mock["processes"])
-            for j, proc in enumerate(mock["processes"]):
-                if j == num_procs - 1:
-                    # Last process takes the rest of the memory
-                    proc_mem = max(50, remaining_mem)
-                else:
-                    # Proportional allocation with some jitter
-                    base_ratio = 1.0 / num_procs
-                    proc_mem = int(mem_used * (base_ratio + random.uniform(-0.05, 0.05)))
-                    proc_mem = max(50, proc_mem)
-                    remaining_mem -= proc_mem
-
-                processes.append({
-                    "pid": proc["pid"],
-                    "name": proc["name"],
-                    "type": proc["type"],
-                    "used_memory": proc_mem
-                })
-
-            gpus.append({
-                "index": idx,
-                "name": mock["name"],
-                "uuid": mock["uuid"],
-                "gpu_util": gpu_util,
+                "vendor": "NVIDIA",
+                "backend": self.name,
+                "memory_kind": "dedicated",
+                "core_count": None,
+                "gpu_util": util.gpu if util else None,
+                "renderer_util": None,
+                "tiler_util": None,
                 "mem_util": mem_util,
-                "mem_total": mock["memory_total"],
+                "mem_total": mem_total,
                 "mem_used": mem_used,
                 "mem_free": mem_free,
-                "temperature": int(temp),
-                "fan_speed": fan_speed,
-                "power_draw": round(power_draw, 1),
-                "power_limit": mock["power_limit"],
-                "processes": processes
+                "temperature": temp,
+                "fan_speed": fan,
+                "power_draw": round(power, 1) if power is not None else None,
+                "power_limit": round(power_limit, 1) if power_limit is not None else None,
+                "process_metric": "memory",
+                "processes": processes,
             })
+        return gpus
 
+    def shutdown(self):
+        try:
+            self.nvml.nvmlShutdown()
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Apple GPU (Metal / MPS) via IOKit registry
+# ═══════════════════════════════════════════════════════════════════
+
+_CREATOR_RE = re.compile(r"pid\s+(\d+),\s*(.*)")
+
+
+class AppleMetalBackend:
+    name = "metal"
+
+    def __init__(self):
+        if platform.system() != "Darwin":
+            raise RuntimeError("Apple Metal backend requires macOS")
+        accelerators = self._read_registry()
+        if not accelerators:
+            raise RuntimeError("No IOAccelerator (GPU) entries found")
+
+        self.metal_support = None
+        self.vendor = None
+        self._read_display_profile()
+
+        self.macos_version = platform.mac_ver()[0] or None
+        self.apple_silicon = platform.machine() == "arm64"
+        self.mps_available = self._mps_available()
+
+        # pid -> (accumulated GPU ns, sample wall-clock ns) per accelerator
+        self._prev_gpu_time = {}
+
+        self.total_memory_mb = (
+            int(psutil.virtual_memory().total / MB) if HAS_PSUTIL else None
+        )
+        logger.info(
+            "Apple GPU backend initialized: %d accelerator(s), %s, MPS %s",
+            len(accelerators), self.metal_support or "Metal",
+            "available" if self.mps_available else "unavailable",
+        )
+
+    # -- static helpers -------------------------------------------------
+
+    @staticmethod
+    def _read_registry():
+        try:
+            out = subprocess.run(
+                ["ioreg", "-a", "-l", "-r", "-c", "IOAccelerator"],
+                capture_output=True, timeout=5,
+            )
+            if out.returncode != 0 or not out.stdout.strip():
+                return []
+            data = plistlib.loads(out.stdout)
+            return data if isinstance(data, list) else [data]
+        except Exception as e:
+            logger.debug("ioreg read failed: %s", e)
+            return []
+
+    def _read_display_profile(self):
+        try:
+            import json
+            out = subprocess.run(
+                ["system_profiler", "SPDisplaysDataType", "-json"],
+                capture_output=True, text=True, timeout=15,
+            )
+            entries = json.loads(out.stdout).get("SPDisplaysDataType", [])
+        except Exception as e:
+            logger.debug("system_profiler failed: %s", e)
+            return
+        for entry in entries:
+            fam = entry.get("spdisplays_mtlgpufamilysupport") or entry.get("spdisplays_metal")
+            if fam:
+                # e.g. "spdisplays_metal4" -> "Metal 4"
+                m = re.search(r"metal(\d+)", fam.lower())
+                self.metal_support = f"Metal {m.group(1)}" if m else "Metal"
+            vendor = entry.get("spdisplays_vendor", "")
+            if "apple" in vendor.lower():
+                self.vendor = "Apple"
+            if self.metal_support:
+                break
+
+    def _mps_available(self):
+        # MPS (as used by PyTorch & co.) requires Metal-capable GPU and macOS 12.3+.
+        if not self.metal_support or not self.macos_version:
+            return False
+        try:
+            parts = [int(x) for x in self.macos_version.split(".")[:2]]
+            while len(parts) < 2:
+                parts.append(0)
+            return tuple(parts) >= (12, 3)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _collect_clients(node, out):
+        if "IOUserClientCreator" in node:
+            out.append(node)
+        for child in node.get("IORegistryEntryChildren", []) or []:
+            AppleMetalBackend._collect_clients(child, out)
+
+    def info(self):
         return {
-            "driver_version": self.driver_version,
-            "cuda_version": self.cuda_version,
-            "gpus": gpus,
-            "timestamp": time.time(),
-            "is_mock": True
+            "metal_support": self.metal_support,
+            "mps_available": self.mps_available,
         }
 
-    def __del__(self):
-        if not self.mock_mode:
+    # -- sampling -------------------------------------------------------
+
+    def _processes(self, acc_index, accelerator, now_ns):
+        clients = []
+        self._collect_clients(accelerator, clients)
+
+        per_pid = {}
+        for c in clients:
+            usage = c.get("AppUsage") or []
+            if not usage:
+                continue
+            m = _CREATOR_RE.match(str(c.get("IOUserClientCreator", "")))
+            if not m:
+                continue
+            pid = int(m.group(1))
+            entry = per_pid.setdefault(pid, {"creator": m.group(2).strip(), "gpu_ns": 0, "apis": set()})
+            for u in usage:
+                entry["gpu_ns"] += int(u.get("accumulatedGPUTime", 0) or 0)
+                if u.get("API"):
+                    entry["apis"].add(str(u["API"]))
+
+        prev = self._prev_gpu_time.get(acc_index, {})
+        current = {}
+        processes = []
+        for pid, entry in per_pid.items():
+            current[pid] = (entry["gpu_ns"], now_ns)
+            gpu_percent = None
+            if pid in prev:
+                prev_ns, prev_t = prev[pid]
+                dt = now_ns - prev_t
+                delta = entry["gpu_ns"] - prev_ns
+                if dt > 0 and delta >= 0:
+                    gpu_percent = round(min(100.0, delta / dt * 100.0), 1)
+            processes.append({
+                "pid": pid,
+                "name": _process_display_name(pid, entry["creator"]),
+                "type": "/".join(sorted(entry["apis"])) or "Metal",
+                "used_memory": None,   # not exposed per-process on macOS
+                "gpu_percent": gpu_percent,
+            })
+        self._prev_gpu_time[acc_index] = current
+        processes.sort(key=lambda p: (p["gpu_percent"] or 0.0), reverse=True)
+        return processes
+
+    def get_gpus(self):
+        now_ns = time.monotonic_ns()
+        gpus = []
+        for i, acc in enumerate(self._read_registry()):
+            stats = acc.get("PerformanceStatistics") or {}
+
+            def pct(key):
+                v = stats.get(key)
+                return int(v) if isinstance(v, (int, float)) else None
+
+            in_use = stats.get("In use system memory")
+            mem_used = int(in_use / MB) if isinstance(in_use, (int, float)) else None
+            mem_total = self.total_memory_mb
+            mem_free = mem_total - mem_used if mem_total is not None and mem_used is not None else None
+            mem_util = (
+                int(mem_used / mem_total * 100)
+                if mem_total and mem_used is not None else None
+            )
+
+            name = acc.get("model") or acc.get("IOClass") or f"Apple GPU {i}"
+            if isinstance(name, bytes):
+                name = name.decode(errors="ignore").strip("\x00")
+            cores = acc.get("gpu-core-count")
+            reg_id = acc.get("IORegistryEntryID")
+
+            gpus.append({
+                "index": i,
+                "name": name,
+                "uuid": f"{acc.get('IOClass', 'IOAccelerator')}-{reg_id}" if reg_id else f"apple-gpu-{i}",
+                "vendor": self.vendor or "Apple",
+                "backend": self.name,
+                "memory_kind": "unified" if self.apple_silicon else "dedicated",
+                "core_count": int(cores) if isinstance(cores, int) else None,
+                "gpu_util": pct("Device Utilization %"),
+                "renderer_util": pct("Renderer Utilization %"),
+                "tiler_util": pct("Tiler Utilization %"),
+                "mem_util": mem_util,
+                "mem_total": mem_total,
+                "mem_used": mem_used,
+                "mem_free": mem_free,
+                # Not readable without root (powermetrics / SMC) -> not reported.
+                "temperature": None,
+                "fan_speed": None,
+                "power_draw": None,
+                "power_limit": None,
+                "process_metric": "gpu_time",
+                "processes": self._processes(i, acc, now_ns),
+            })
+        return gpus
+
+    def shutdown(self):
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Facade
+# ═══════════════════════════════════════════════════════════════════
+
+class GPUMonitor:
+    def __init__(self):
+        self.backend = None
+        system = platform.system()
+        candidates = [AppleMetalBackend] if system == "Darwin" else [NvidiaBackend]
+        for cls in candidates:
             try:
-                pynvml.nvmlShutdown()
-            except Exception:
-                pass
+                self.backend = cls()
+                break
+            except Exception as e:
+                logger.info("GPU backend '%s' unavailable: %s", cls.name, e)
+        if self.backend is None:
+            logger.info("No supported GPU detected. GPU telemetry disabled.")
+
+    @property
+    def backend_name(self):
+        return self.backend.name if self.backend else None
+
+    def info(self):
+        base = {
+            "gpu_backend": self.backend_name,
+            "driver_version": None,
+            "cuda_version": None,
+            "metal_support": None,
+            "mps_available": None,
+        }
+        if self.backend:
+            base.update(self.backend.info())
+        return base
+
+    def get_gpu_data(self):
+        gpus = []
+        if self.backend:
+            try:
+                gpus = self.backend.get_gpus()
+            except Exception as e:
+                logger.error("Failed to read GPU telemetry: %s", e)
+        return {**self.info(), "gpus": gpus, "timestamp": time.time()}
+
+    def __del__(self):
+        if self.backend:
+            self.backend.shutdown()

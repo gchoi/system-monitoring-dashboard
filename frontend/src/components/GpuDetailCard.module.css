@@ -1,9 +1,11 @@
 .detailCard {
   padding: 24px;
-  background: var(--glass-bg);
-  backdrop-filter: blur(16px);
+  background: var(--glass-sheen), var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(24px) saturate(165%);
+  backdrop-filter: blur(24px) saturate(165%);
   border: 1px solid var(--glass-border);
-  border-radius: 16px;
+  border-radius: 24px;
 }
 
 .titleHeader {
@@ -11,14 +13,14 @@
   justify-content: space-between;
   align-items: center;
   margin-bottom: 24px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--glass-border);
   padding-bottom: 16px;
 }
 
 .deviceTitle {
   font-family: var(--font-display);
   font-size: 1.25rem;
-  font-weight: 800;
+  font-weight: 650;
   color: var(--text-bright);
 }
 
@@ -26,15 +28,15 @@
   font-family: var(--font-mono);
   font-size: 0.7rem;
   color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface-hover);
   padding: 4px 8px;
   border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--glass-border);
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 20px;
 }
 
@@ -51,7 +53,7 @@
 }
 
 .metricBlock {
-  background: rgba(255, 255, 255, 0.015);
+  background: var(--surface-hover);
   border: 1px solid var(--glass-border);
   padding: 20px;
   border-radius: 12px;
@@ -64,7 +66,7 @@
 }
 
 .metricBlock:hover {
-  border-color: rgba(255, 255, 255, 0.08);
+  border-color: var(--glass-border-glow);
 }
 
 .metricHeader {
@@ -88,14 +90,14 @@
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface-hover);
   color: var(--text-muted);
 }
 
 .metricValue {
   font-family: var(--font-display);
   font-size: 1.75rem;
-  font-weight: 800;
+  font-weight: 650;
   color: var(--text-bright);
   line-height: 1;
 }
@@ -110,7 +112,7 @@
 .progressContainer {
   height: 6px;
   width: 100%;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-hover);
   border-radius: 3px;
   overflow: hidden;
   margin-top: 4px;
@@ -124,22 +126,22 @@
 
 .barCyan {
   background: linear-gradient(90deg, var(--accent-cyan), var(--accent-blue));
-  box-shadow: 0 0 10px rgba(0, 242, 254, 0.2);
+  box-shadow: var(--control-shadow);
 }
 
 .barPurple {
   background: linear-gradient(90deg, var(--accent-purple), var(--accent-pink));
-  box-shadow: 0 0 10px rgba(127, 0, 255, 0.2);
+  box-shadow: var(--control-shadow);
 }
 
 .barGreen {
-  background: linear-gradient(90deg, var(--accent-green), #00d2c4);
-  box-shadow: 0 0 10px rgba(0, 255, 135, 0.2);
+  background: linear-gradient(90deg, var(--accent-green), var(--accent-cyan));
+  box-shadow: var(--control-shadow);
 }
 
 .barOrange {
   background: linear-gradient(90deg, var(--accent-orange), var(--accent-red));
-  box-shadow: 0 0 10px rgba(255, 159, 67, 0.2);
+  box-shadow: var(--control-shadow);
 }
 
 .subText {
